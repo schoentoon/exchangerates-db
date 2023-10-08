@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"io"
+	"io/fs"
 	"net/http"
 	"strconv"
 
@@ -14,8 +15,16 @@ import (
 type Datasource struct {
 }
 
-func (d *Datasource) Import(ch chan<- database.CurrencyRate) error {
-	resp, err := http.Get("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip")
+func (d *Datasource) ImportAll(ch chan<- database.CurrencyRate) error {
+	return d.importFromUrl(ch, "http://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip", "eurofxref-hist.csv")
+}
+
+func (d *Datasource) ImportLatest(ch chan<- database.CurrencyRate) error {
+	return d.importFromUrl(ch, "http://www.ecb.europa.eu/stats/eurofxref/eurofxref.zip", "eurofxref.csv")
+}
+
+func (d *Datasource) importFromUrl(ch chan<- database.CurrencyRate, url, filename string) error {
+	resp, err := http.Get(url)
 	if err != nil {
 		return err
 	}
@@ -32,12 +41,16 @@ func (d *Datasource) Import(ch chan<- database.CurrencyRate) error {
 		return err
 	}
 
-	f, err := unzipper.Open("eurofxref-hist.csv")
+	f, err := unzipper.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
+	return d.handleZipfile(f, ch)
+}
+
+func (d *Datasource) handleZipfile(f fs.File, ch chan<- database.CurrencyRate) error {
 	reader := csv.NewReader(f)
 
 	header, err := reader.Read()

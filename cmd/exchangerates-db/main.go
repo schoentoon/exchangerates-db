@@ -1,54 +1,81 @@
 package main
 
 import (
-	"log"
+	"flag"
+	"sync"
 
 	"github.com/schoentoon/exchangerates-db/pkg/database"
-	"github.com/schoentoon/exchangerates-db/pkg/datasources/ecb"
+	"github.com/sirupsen/logrus"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 func main() {
-	db, err := database.Init(sqlite.Open("test.db"), &gorm.Config{})
-	if err != nil {
-		log.Fatal(err)
+	configFile := flag.String("config", "config.yml", "What config file to use?")
+	flag.Parse()
+
+	if *configFile == "" {
+		logrus.Fatal("No config file specified")
 	}
 
-	ch := make(chan database.CurrencyRate, 16)
+	cfg, err := ReadConfig(*configFile)
+	if err != nil {
+		logrus.Fatal(err)
+	}
 
-	go func() {
-		source := &ecb.Datasource{}
-		err = source.Import(ch)
+	if cfg.Debug {
+		logrus.SetReportCaller(true)
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+
+	var connector gorm.Dialector
+
+	switch cfg.DB.Driver {
+	case "sqlite":
+		connector = sqlite.Open(cfg.DB.DSN)
+	case "mysql":
+		connector = mysql.Open(cfg.DB.DSN)
+	case "postgres":
+		connector = postgres.Open(cfg.DB.DSN)
+	default:
+		logrus.Fatalf("Invalid DB driver specified: %s", cfg.DB.Driver)
+	}
+
+	db, err := database.Init(connector, &gorm.Config{})
+	if err != nil {
+		logrus.Fatal(err)
+	}
+
+	importers := []*Importer{}
+
+	for _, importerCfg := range cfg.Importers {
+		importer, err := NewImporter(importerCfg.Driver, importerCfg.When)
 		if err != nil {
-			log.Fatal(err)
+			logrus.Fatal(err)
 		}
-		close(ch)
-	}()
+		importers = append(importers, importer)
+	}
 
-	db.Transaction(func(tx *gorm.DB) error {
-		// we buffer up to this amount of currency rates to insert them all at once
-		// we do however allocate the entire buffer right away so we won't have to
-		// constantly resize the array for it while building up our buffer etc
-		BUFFER_SIZE := 10000
-		buffer := make([]database.CurrencyRate, BUFFER_SIZE)
+	var wg sync.WaitGroup
 
-		pos := 0
-		for data := range ch {
-			buffer[pos] = data
+	for _, importer := range importers {
+		if !importer.When.Startup {
+			continue
+		}
 
-			pos++
+		wg.Add(1)
 
-			// our buffer is full, so we insert it and we reset our position back to the start
-			// no need to clear the buffer, we'll just write over the already inserted rates
-			if pos == (BUFFER_SIZE - 1) {
-				db.Clauses(clause.OnConflict{DoNothing: true}).Create(buffer)
-				pos = 0
+		go func(importer *Importer, wg *sync.WaitGroup) {
+			err := importer.ImportAll(db)
+			if err != nil {
+				logrus.Error(err)
 			}
-		}
+			wg.Done()
+		}(importer, &wg)
 
-		db.Clauses(clause.OnConflict{DoNothing: true}).Create(buffer)
-		return nil
-	})
+	}
+
+	wg.Wait()
 }

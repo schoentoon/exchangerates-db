@@ -1,0 +1,7 @@
+database:
+  driver: "sqlite"
+  dsn: "test.db"
+importers:
+  - driver: "ecb"
+    when:
+      startup: true
